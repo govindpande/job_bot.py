@@ -4,27 +4,25 @@ import streamlit as st
 import openai
 import os
 import json
-import csv
-from jobspy import scrape_jobs
+from linkedin_api import Linkedin
 import pandas as pd
 
 # Set your OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def fetch_job_descriptions(site_names, search_term, location, results_wanted=5, hours_old=72):
-    st.info(f"Fetching job descriptions for '{search_term}' in '{location}'...")
+def fetch_linkedin_jobs(api, keywords, location, num_jobs=5, posted_in_last_minutes=15):
+    st.info(f"Fetching LinkedIn jobs for '{keywords}' in '{location}' posted in the last {posted_in_last_minutes} minutes...")
     try:
-        jobs_df = scrape_jobs(
-            site_name=site_names,
-            search_term=search_term,
-            location=location,
-            results_wanted=results_wanted,
-            hours_old=hours_old,
+        jobs = api.search_jobs(
+            keywords=keywords,
+            location_name=location,
+            listed_at=posted_in_last_minutes * 60,  # Convert minutes to seconds
+            limit=num_jobs
         )
-        return jobs_df
+        return jobs
     except Exception as e:
-        st.error(f"Error fetching job descriptions: {e}")
-        return pd.DataFrame()
+        st.error(f"Error fetching jobs from LinkedIn: {e}")
+        return []
 
 def generate_custom_resume(profile, job_description):
     prompt = f"""
@@ -73,7 +71,23 @@ def generate_cover_letter(profile, job_description):
     return cover_letter
 
 def main():
-    st.title("Automate Your Job Application with GPT-4 and JobSpy")
+    st.title("Automate Your Job Application with GPT-4 and LinkedIn API")
+
+    # LinkedIn Credentials
+    st.sidebar.header("LinkedIn Credentials")
+    linkedin_username = st.sidebar.text_input("LinkedIn Username (Email)", type="default")
+    linkedin_password = st.sidebar.text_input("LinkedIn Password", type="password")
+
+    if not linkedin_username or not linkedin_password:
+        st.warning("Please enter your LinkedIn credentials to proceed.")
+        return
+
+    # Initialize LinkedIn API
+    try:
+        api = Linkedin(linkedin_username, linkedin_password)
+    except Exception as e:
+        st.error(f"Failed to authenticate with LinkedIn: {e}")
+        return
 
     # Profile Section
     st.sidebar.header("Your Profile")
@@ -100,42 +114,37 @@ def main():
         st.session_state.profile[key] = st.sidebar.text_area(question, st.session_state.profile.get(key, ""), height=100)
 
     st.header("Job Search Parameters")
-    site_names = st.multiselect(
-        "Select Job Sites to Search",
-        options=["indeed", "linkedin", "zip_recruiter", "glassdoor", "google"],
-        default=["indeed", "linkedin"]
-    )
-    search_term = st.text_input("Job Title or Keywords")
+    keywords = st.text_input("Job Title or Keywords")
     location = st.text_input("Location")
-    results_wanted = st.number_input("Number of Jobs to Fetch per Site", min_value=1, max_value=100, value=5)
-    hours_old = st.number_input("Max Job Posting Age (in hours)", min_value=1, max_value=168, value=72)
+    num_jobs = st.number_input("Number of Jobs to Fetch", min_value=1, max_value=100, value=5)
+    posted_in_last_minutes = st.number_input("Posted in Last (minutes)", min_value=1, max_value=1440, value=15)
 
-    if st.button("Fetch Job Descriptions"):
-        if site_names and search_term and location:
-            with st.spinner("Fetching job descriptions..."):
-                jobs_df = fetch_job_descriptions(site_names, search_term, location, results_wanted, hours_old)
-            if not jobs_df.empty:
-                st.session_state.jobs_df = jobs_df
-                st.success(f"Fetched {len(jobs_df)} job descriptions.")
+    if st.button("Fetch LinkedIn Jobs"):
+        if keywords and location:
+            with st.spinner("Fetching jobs from LinkedIn..."):
+                jobs = fetch_linkedin_jobs(api, keywords, location, num_jobs, posted_in_last_minutes)
+            if jobs:
+                st.session_state.jobs = jobs
+                st.success(f"Fetched {len(jobs)} jobs from LinkedIn.")
             else:
                 st.error("No jobs found. Try adjusting your search parameters.")
         else:
-            st.error("Please provide job sites, job title/keywords, and location.")
+            st.error("Please provide both job title/keywords and location.")
 
-    if "jobs_df" in st.session_state:
-        jobs_df = st.session_state.jobs_df
-        for idx, job in jobs_df.iterrows():
-            st.subheader(f"Job {idx+1}: {job['title']} at {job['company']}")
-            st.write(f"**Location**: {job['city']}, {job['state']}")
-            st.write(f"**Job Type**: {job['job_type']}")
-            st.write(f"**Job URL**: {job['job_url']}")
-            st.write(f"**Description**:\n{job['description']}")
+    if "jobs" in st.session_state:
+        jobs = st.session_state.jobs
+        for idx, job in enumerate(jobs):
+            st.subheader(f"Job {idx+1}: {job['title']} at {job['companyDetails']['com.linkedin.voyager.deco.jobs.web.shared.WebCompactCompany']['name']}")
+            st.write(f"**Location**: {job.get('formattedLocation', 'N/A')}")
+            st.write(f"**Job URL**: https://www.linkedin.com/jobs/view/{job['dashEntityUrn'].split(':')[-1]}")
+            st.write(f"**Description**:\n{job.get('description', 'No description available.')}")
 
             if st.button(f"Customize Resume and Cover Letter for Job {idx+1}"):
                 with st.spinner("Generating customized resume and cover letter..."):
                     profile_str = "\n".join(f"{k}: {v}" for k, v in st.session_state.profile.items())
-                    customized_resume = generate_custom_resume(profile_str, job['description'])
-                    cover_letter = generate_cover_letter(profile_str, job['description'])
+                    job_description = job.get('description', '')
+                    customized_resume = generate_custom_resume(profile_str, job_description)
+                    cover_letter = generate_cover_letter(profile_str, job_description)
                 st.success("Generated customized documents.")
 
                 st.header("Customized Resume")
@@ -144,7 +153,6 @@ def main():
                 st.header("Cover Letter")
                 st.write(cover_letter)
 
-                # Placeholder for job application submission
                 st.info("Please review your resume and cover letter before applying.")
 
                 # Dynamically add new questions if encountered
